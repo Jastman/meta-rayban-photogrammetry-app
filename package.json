@@ -1,0 +1,17 @@
+{
+  "name": "meta-rayban-photogrammetry-app",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/server",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @prototype/server",
+    "build": "npm run build -w @prototype/native-companion-contract && npm run build -w @prototype/server",
+    "start": "npm run start -w @prototype/server",
+    "test": "node --test apps/glasses-web/*.test.js && npm run test -w @prototype/server",
+    "typecheck": "npm run typecheck -w @prototype/native-companion-contract && npm run typecheck -w @prototype/server"
+  }
+}

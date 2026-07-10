@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cesium Splat Capture Prototype</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="hud" role="application" aria-label="Photogrammetry capture guide">
+      <header class="hud__header">
+        <div class="brand">
+          <img src="./assets/Cesium_logo_only.svg" alt="Cesium" />
+          <span><strong>CESIUM SPLAT CAPTURE</strong><small>PROTOTYPE</small></span>
+        </div>
+        <div class="header-meta">
+          <span id="session-state">Ready</span>
+          <small>Powered by Cesium ion</small>
+        </div>
+      </header>
+      <div id="terminal-banner" class="terminal-banner hidden" role="status" aria-live="assertive"></div>
+      <nav class="hud__nav" aria-label="Navigation">
+        <button data-screen="capture" class="nav-btn active">Capture</button>
+        <button data-screen="review" class="nav-btn">Review</button>
+        <button data-screen="settings" class="nav-btn">Status</button>
+      </nav>
+
+      <section id="capture-screen" class="screen active" aria-label="Guided capture">
+        <div class="camera-preview" id="camera-preview">
+          <video id="browser-preview" muted playsinline aria-label="Opt-in browser camera preview"></video>
+          <img id="native-preview" alt="Live preview frames supplied by the native DAT companion" />
+          <div class="simulated-feed" id="simulated-feed" aria-label="Simulated live preview">
+            <span>SIMULATED PREVIEW</span>
+            <small>Not the Meta glasses camera</small>
+          </div>
+          <div class="feed-shade" aria-hidden="true"></div>
+
+          <div class="preview-top">
+            <span id="preview-source">SIM FEED</span>
+            <span id="quality-status">FIXED LENS · MOVE SLOWLY</span>
+          </div>
+
+          <div class="target-reticle" aria-hidden="true">
+            <span class="corner c1"></span><span class="corner c2"></span>
+            <span class="corner c3"></span><span class="corner c4"></span>
+            <div class="object-silhouette"></div>
+          </div>
+
+          <div class="movement-cue">
+            <span id="movement-arrow" aria-hidden="true">◎</span>
+            <strong id="immediate-instruction">START A CAPTURE SESSION</strong>
+            <small id="position-detail">Keep the object centered and fully visible</small>
+          </div>
+
+          <div class="orbit-panel" aria-label="Orbit progress">
+            <div class="ring-stack" id="ring-stack"></div>
+            <div class="orbit-map" id="orbit-map" role="img" aria-label="Top-down next capture position">
+              <div class="orbit-object">OBJ</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="capture-controls">
+          <button id="create-session-btn">Start</button>
+          <button id="browser-preview-btn" aria-pressed="false">Use Browser Camera</button>
+          <button id="simulate-photo-btn" class="capture-btn" disabled>Capture</button>
+        </div>
+
+        <div class="context-strip">
+          <span id="capture-message" class="message" aria-live="polite">Move around the object; never rotate in place.</span>
+          <label class="upload-label" title="Add local images to the guided station sequence">
+            Add files
+            <input id="file-input" type="file" multiple accept="image/*" disabled />
+          </label>
+        </div>
+
+        <div class="capture-actions" aria-label="Reconstruction actions">
+          <label>
+            Mode
+            <select id="submit-mode">
+              <option value="auto" selected>Auto</option>
+              <option value="mock">Mock</option>
+              <option value="ion">Ion</option>
+            </select>
+          </label>
+          <button id="submit-job-btn" disabled>Submit Reconstruction</button>
+        </div>
+      </section>
+
+      <section id="review-screen" class="screen">
+        <div class="review-actions">
+          <strong>Cesium ion reconstruction</strong>
+          <button id="poll-job-btn" disabled>Refresh Job Status</button>
+        </div>
+        <p id="stream-status" class="stream-status">Live job updates start after submission.</p>
+        <div id="job-status" class="status-card" tabindex="-1">No reconstruction submitted.</div>
+        <article id="model-card" class="model-card hidden">
+          <h2>Model Review <span>CESIUM ION OUTPUT</span></h2>
+          <img id="model-thumbnail" alt="Model preview" />
+          <p id="model-notes"></p>
+          <p id="model-url"></p>
+        </article>
+      </section>
+
+      <section id="settings-screen" class="screen">
+        <div id="config-card" class="status-card">Loading backend config…</div>
+        <div class="notification-control">
+          <button id="notification-btn" aria-pressed="false">Enable completion alerts</button>
+          <span id="notification-status" role="status">Checking browser support…</span>
+        </div>
+        <p class="small-note">Preview is simulated unless you explicitly enable this browser's camera. Meta DAT frames require the future native companion.</p>
+        <p class="small-note">On-glasses background alerts are unavailable; a future Android companion must notify when this app is inactive.</p>
+        <p class="small-note">D-pad: Left/Right tabs · Up/Down focus · Enter activate</p>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

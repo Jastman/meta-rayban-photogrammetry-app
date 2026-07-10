@@ -1,0 +1,10 @@
+// Copy to Local.xcconfig. This file is gitignored.
+PRODUCT_BUNDLE_IDENTIFIER = com.yourcompany.SplatCaptureCompanion
+DEVELOPMENT_TEAM = YOUR_APPLE_TEAM_ID
+META_APP_ID = YOUR_META_APP_ID
+CLIENT_TOKEN = YOUR_META_CLIENT_TOKEN
+MWDAT_URL_SCHEME = your-registered-callback-scheme
+// A physical iPhone cannot reach your Mac through localhost. Use the Mac's LAN IP.
+SERVER_BASE_URL = http:/$()/172.22.23.5:8788
+// Empty = mock in Simulator and real DAT on iPhone. Set YES to force Mock Device Kit.
+USE_DAT_MOCK_DEVICE = YES
