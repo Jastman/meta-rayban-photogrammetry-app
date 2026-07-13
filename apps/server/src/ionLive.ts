@@ -352,10 +352,11 @@ export const initializeIonLiveJob = async (
   const writeScopeGuidance = await probeIonWriteScope(config);
 
   const photos = await resolvePhotoBytes(session, config);
-  const captureName = `Splat Capture ${session.id}`;
+  const captureName = `Meta Ray-Ban Companion ${session.id}`;
   const createAssetPayload = {
     name: captureName,
-    description: "Gaussian Splat captured via Meta Ray-Ban companion app",
+    description:
+      "Captured via the Meta Ray-Ban companion app for Cesium photogrammetry/gaussian splat processing.",
     attribution: "",
     type: "3DTILES",
     options: {
