@@ -10,7 +10,8 @@ import type { ServerConfig } from "./config.js";
 import { CAPTURE_THRESHOLDS, summarizeGuidance } from "./guidance.js";
 import { JobStatusMonitor } from "./jobEvents.js";
 import { evaluateJobStatus, isTerminalJobStatus } from "./jobStatus.js";
-import { initializeIonLiveJob, refreshIonLiveJob } from "./ionLive.js";
+import { initializeIonLiveJob, refreshIonLiveJob, checkIonReadiness } from "./ionLive.js";
+import type { IonReadinessStatus } from "./ionLive.js";
 import {
   createAssetJob,
   createCaptureSession,
@@ -141,6 +142,20 @@ export const createApp = (config: ServerConfig): express.Express => {
   const app = express();
   const livePollers = new Map<string, NodeJS.Timeout>();
 
+  let ionReadinessCache: { result: IonReadinessStatus; expiresAt: number } | null = null;
+
+  const getIonReadiness = async (): Promise<IonReadinessStatus> => {
+    if (ionReadinessCache && Date.now() < ionReadinessCache.expiresAt) {
+      return ionReadinessCache.result;
+    }
+    const result = await checkIonReadiness(config);
+    ionReadinessCache = { result, expiresAt: Date.now() + 60_000 };
+    return result;
+  };
+
+  // Warm the readiness cache in the background at startup.
+  void getIonReadiness();
+
   const stopLivePoller = (jobId: string): void => {
     const timer = livePollers.get(jobId);
     if (timer) {
@@ -230,7 +245,13 @@ export const createApp = (config: ServerConfig): express.Express => {
     });
   });
 
-  app.get("/api/config", (_req, res) => {
+  app.get("/api/config", async (_req, res) => {
+    let ionReadiness: IonReadinessStatus | null = null;
+    try {
+      ionReadiness = await getIonReadiness();
+    } catch {
+      // Non-fatal; return null readiness rather than failing the config endpoint.
+    }
     res.json({
       captureThresholds: CAPTURE_THRESHOLDS,
       cesium: {
@@ -238,6 +259,7 @@ export const createApp = (config: ServerConfig): express.Express => {
         hasToken: Boolean(config.cesiumIonToken),
         allowMockResults: config.allowMockResults,
         enableLiveIonSubmission: config.enableLiveIonSubmission,
+        ionReadiness,
       },
     });
   });

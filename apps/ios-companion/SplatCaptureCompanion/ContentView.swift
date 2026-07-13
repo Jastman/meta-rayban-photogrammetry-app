@@ -217,6 +217,12 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(model.notificationsEnabled)
+                if let warning = model.liveSubmissionWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(.vertical, 2)
+                }
                 Button(model.isSubmittingReconstruction ? "Submitting..." : "Submit reconstruction") {
                     Task { await model.submitReconstruction() }
                 }

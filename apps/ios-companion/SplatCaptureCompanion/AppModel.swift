@@ -75,6 +75,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var captureInputMode: CaptureInputMode = .glassesLive
     @Published private(set) var fallbackMessage: String?
+    @Published private(set) var ionReadiness: IonReadinessResponse?
+    @Published private(set) var enableLiveIonSubmission = false
     @Published var errorMessage: String?
 
     var canRegister: Bool {
@@ -131,6 +133,21 @@ final class AppModel: ObservableObject {
 
     var canSubmitReconstruction: Bool {
         completedStationCount >= 36 && !isSubmittingReconstruction && !hasActiveReconstructionInFlight
+    }
+
+    var liveSubmissionWarning: String? {
+        guard enableLiveIonSubmission else { return nil }
+        guard let r = ionReadiness else { return nil }
+        if !r.tokenPresent {
+            return "Live ion processing unavailable: no API token configured. Set CESIUM_ION_TOKEN on the server with assets:read + assets:write scopes."
+        }
+        if r.readAccessOk == false {
+            return "Ion token failed read access: \(r.message)"
+        }
+        if r.writeScopeOk == false {
+            return "Ion token may lack write scope: \(r.message)"
+        }
+        return nil
     }
 
     var fallbackPreviewSession: AVCaptureSession? {
@@ -229,6 +246,17 @@ final class AppModel: ObservableObject {
             startupState = .started
             if let client {
                 startMonitoringTrackedJobs(client: client)
+            }
+            // Background config fetch: non-fatal, updates ion readiness for UI warning.
+            Task { @MainActor [weak self] in
+                guard let self, let client = self.client else { return }
+                do {
+                    let cfg = try await client.fetchConfig()
+                    self.ionReadiness = cfg.cesium.ionReadiness
+                    self.enableLiveIonSubmission = cfg.cesium.enableLiveIonSubmission
+                } catch {
+                    // Non-fatal: readiness warning won't show, but app continues normally.
+                }
             }
         } catch {
             startupState = .idle

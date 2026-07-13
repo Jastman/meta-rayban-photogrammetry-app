@@ -53,21 +53,36 @@ export ENABLE_LIVE_ION_SUBMISSION=false     # default false
 - **Live mode:** token present + `ENABLE_LIVE_ION_SUBMISSION=true` → submit/poll ion and map to `queued` / `processing` / `completed` with `result.provider="ion"`.
 - **Explicit fail-fast:** token present but live disabled and ion requested → explicit error (no silent fallback).
 
-**Current live caveat (important):**
-If ion returns `405 MethodNotAllowed` with
-`{"code":"MethodNotAllowed","message":"POST is not allowed"}`
-on `POST /v1/reality-capture/gaussian-splats/jobs`, the public endpoint is not available for this account/path. Use mock mode for now and ensure token scope includes `assets:write`.
+**Live ion token requirements:**
+The token must have both `assets:read` and `assets:write` scopes. The `GET /api/config` endpoint runs a preflight against the ion API and reports readiness — the iOS companion surfaces this as a warning before you submit. If you see `"assetRegion"` in the error, your ion account requires a region-specific endpoint; contact Cesium ion support.
 
 ## Local run
 
 ### Server (BFF)
 
+**Development (hot-reload — use for iterating on server code):**
+
 ```bash
 npm install
-npm run dev --workspace @apps/server
+npm run dev -w @prototype/server
 ```
 
-Default local server URL: `http://localhost:8788`
+> ⚠️ `npm run dev` uses `tsx watch` which restarts the process on file changes. During long-running ion polling this can cause **port collisions and dropped SSE connections**. Do not use for device testing or live ion submissions.
+
+**Stable (compiled — use for device/live ion testing and production-like runs):**
+
+```bash
+npm run build          # compiles server + contracts
+npm start              # runs node apps/server/dist/index.js
+```
+
+Or in one step:
+
+```bash
+npm run build -w @prototype/server && node apps/server/dist/index.js
+```
+
+Default local server URL: `http://localhost:8787`
 
 ### Glasses web HUD
 
@@ -98,7 +113,7 @@ Default local web URL: `http://localhost:8787`
 ## Known limitations
 
 - DAT-based live glasses capture depends on user credentials, hardware/firmware, and Meta setup.
-- Live Cesium ion Gaussian Splat submission may be unavailable on current public endpoint for some accounts (405 caveat above).
+- Live Cesium ion Gaussian Splat reconstruction via API requires an account plan that supports `POST /v1/assets`. If ion returns a region-routing error, contact Cesium ion support. Use mock mode to validate the capture flow independently.
 - Review UI currently focuses on status + metadata and mock preview assets; it is not yet a full in-app real splat renderer.
 - Notifications are in-app/local; production background completion needs server-driven push infra.
 

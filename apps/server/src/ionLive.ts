@@ -334,6 +334,98 @@ const signalIonUploadComplete = async (
   });
 };
 
+export interface IonReadinessStatus {
+  tokenPresent: boolean;
+  readAccessOk: boolean | null;
+  writeScopeOk: boolean | null;
+  message: string;
+  checkedAt: string;
+}
+
+export const checkIonReadiness = async (config: ServerConfig): Promise<IonReadinessStatus> => {
+  const checkedAt = new Date().toISOString();
+
+  if (!config.cesiumIonToken) {
+    return {
+      tokenPresent: false,
+      readAccessOk: null,
+      writeScopeOk: null,
+      message:
+        "CESIUM_ION_TOKEN is not set. Create a token at ion.cesium.com with assets:read and assets:write scopes.",
+      checkedAt,
+    };
+  }
+
+  let readAccessOk: boolean;
+  let readMessage: string | undefined;
+  try {
+    const readResponse = await fetch(toAbsoluteUrl(config.cesiumIonApiUrl, "/v1/assets"), {
+      method: "GET",
+      headers: ionHeaders(config),
+    });
+    readAccessOk = readResponse.ok;
+    if (!readResponse.ok) {
+      const error = await readIonBody(readResponse);
+      readMessage = `Token read preflight failed (${readResponse.status}): ${error.message}. Verify the token is valid and has assets:read scope.`;
+    }
+  } catch (error) {
+    readAccessOk = false;
+    readMessage = `Network error reaching Cesium ion: ${error instanceof Error ? error.message : String(error)}.`;
+  }
+
+  if (!readAccessOk) {
+    return {
+      tokenPresent: true,
+      readAccessOk: false,
+      writeScopeOk: null,
+      message: readMessage ?? "Cesium ion token read-access check failed.",
+      checkedAt,
+    };
+  }
+
+  let writeScopeOk: boolean | null;
+  let writeMessage: string | undefined;
+  try {
+    const probeResponse = await fetch(toAbsoluteUrl(config.cesiumIonApiUrl, "/v1/assets"), {
+      method: "POST",
+      headers: ionHeaders(config),
+      body: JSON.stringify({}),
+    });
+    if (probeResponse.status === 401 || probeResponse.status === 403) {
+      writeScopeOk = false;
+      const error = await readIonBody(probeResponse);
+      writeMessage = `Create/use a Cesium ion token with assets:write permission (probe denied: ${probeResponse.status} ${error.message}).`;
+    } else {
+      writeScopeOk = true;
+    }
+  } catch {
+    writeScopeOk = null;
+  }
+
+  if (writeScopeOk === false) {
+    return {
+      tokenPresent: true,
+      readAccessOk: true,
+      writeScopeOk: false,
+      message:
+        writeMessage ??
+        "Create/use a Cesium ion token with assets:read and assets:write scopes.",
+      checkedAt,
+    };
+  }
+
+  return {
+    tokenPresent: true,
+    readAccessOk: true,
+    writeScopeOk,
+    message:
+      writeScopeOk === true
+        ? "Cesium ion credentials appear ready for live submission."
+        : "Cesium ion read access confirmed; write scope is uncertain.",
+    checkedAt,
+  };
+};
+
 export const initializeIonLiveJob = async (
   job: AssetJob,
   session: CaptureSession,
@@ -406,6 +498,14 @@ export const initializeIonLiveJob = async (
     if (createResponse.status === 401 || createResponse.status === 403) {
       throw new Error(
         `Cesium ion asset creation was denied (${createResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}${details ? ` | body: ${details}` : ""}). ${writeScopeGuidance ?? "Create/use a Cesium ion token with assets:write permission."}`,
+      );
+    }
+    if (
+      createResponse.status === 404 &&
+      (error.message.includes("assetRegion") || error.code === "ResourceNotFound")
+    ) {
+      throw new Error(
+        `Cesium ion asset creation failed: your account requires a region-specific endpoint (ion returned: ${error.message}). This is an account or plan configuration issue — contact Cesium ion support at support@cesium.com.`,
       );
     }
     throw new Error(
