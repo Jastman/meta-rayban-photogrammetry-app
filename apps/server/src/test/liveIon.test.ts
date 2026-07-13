@@ -46,58 +46,93 @@ const seedCompleteCapture = async (baseUrl: string, sessionId: string) => {
 };
 
 test("live ion mode submits and maps queued/processing/completed statuses", async () => {
-  const statusSequence = ["queued", "processing", "completed"];
+  const statusSequence = ["NOT_STARTED", "IN_PROGRESS", "COMPLETE"];
   let pollCount = 0;
   let createCalls = 0;
+  let uploadCompleteCalls = 0;
+  const uploadedKeys: string[] = [];
 
   const ionServer = createServer((req, res) => {
-    if (req.method === "GET" && req.url?.startsWith("/v1/assets")) {
+    if (req.method === "GET" && req.url === "/v1/assets") {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ items: [] }));
       return;
     }
-    if (req.method === "POST" && req.url === "/v1/assets") {
-      res.statusCode = 400;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ code: "BadRequest", message: "Missing required asset fields." }));
-      return;
-    }
-    if (req.method === "POST" && req.url === "/v1/reality-capture/gaussian-splats/jobs") {
-      createCalls += 1;
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk.toString();
-      });
-      req.on("end", () => {
-        const parsed = JSON.parse(body) as { photos: unknown[] };
-        assert.ok(parsed.photos.length >= 1);
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            jobId: "ion-job-1",
-            assetId: 987654,
-            statusPath: "/v1/reality-capture/gaussian-splats/jobs/ion-job-1",
-          }),
-        );
-      });
-      return;
-    }
-    if (req.method === "GET" && req.url === "/v1/reality-capture/gaussian-splats/jobs/ion-job-1") {
+    if (req.method === "GET" && req.url === "/v1/assets/987654") {
       const status = statusSequence[Math.min(pollCount, statusSequence.length - 1)];
       pollCount += 1;
       res.setHeader("content-type", "application/json");
       res.end(
         JSON.stringify({
+          id: 987654,
           status,
-          progress: status === "queued" ? 10 : status === "processing" ? 62 : 100,
+          percentComplete: status === "NOT_STARTED" ? 10 : status === "IN_PROGRESS" ? 64 : 100,
           message:
-            status === "completed" ? "Ion complete" : status === "processing" ? "Ion processing" : "Ion queued",
-          assetId: 987654,
-          viewerUrl: "https://ion.cesium.com/assets/987654",
-          thumbnailUrl: "https://ion.cesium.com/assets/987654/thumbnail.png",
-          notes: "Live ion result",
+            status === "COMPLETE"
+              ? "Ion complete"
+              : status === "IN_PROGRESS"
+                ? "Ion processing"
+                : "Ion queued",
+          thumbnailUrl:
+            status === "COMPLETE" ? "https://ion.cesium.com/assets/987654/thumbnail.png" : undefined,
         }),
       );
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/assets") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk.toString();
+      });
+      req.on("end", () => {
+        const parsed = JSON.parse(body) as Record<string, unknown>;
+        if (Object.keys(parsed).length === 0) {
+          res.statusCode = 400;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ code: "BadRequest", message: "Missing required asset fields." }));
+          return;
+        }
+        createCalls += 1;
+        assert.equal(parsed.type, "3DTILES");
+        assert.equal((parsed.options as { sourceType: string }).sourceType, "3D_CAPTURE");
+        assert.equal((parsed.options as { gaussianSplats: boolean }).gaussianSplats, true);
+        const address = ionServer.address();
+        assert.ok(address && typeof address !== "string");
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            assetMetadata: { id: 987654 },
+            uploadLocation: {
+              bucket: "capture-bucket",
+              prefix: "session-123/",
+              accessKey: "test-access-key",
+              secretAccessKey: "test-secret-key",
+              sessionToken: "test-session-token",
+              endpoint: `http://127.0.0.1:${address.port}/s3`,
+            },
+            onComplete: {
+              url: "/v1/assets/987654/uploadComplete",
+              method: "POST",
+              fields: {},
+            },
+          }),
+        );
+      });
+      return;
+    }
+    if (req.method === "PUT" && req.url?.startsWith("/s3/capture-bucket/session-123/")) {
+      uploadedKeys.push(req.url.replace("/s3/capture-bucket/", ""));
+      req.resume();
+      req.on("end", () => {
+        res.statusCode = 200;
+        res.end("");
+      });
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/assets/987654/uploadComplete") {
+      uploadCompleteCalls += 1;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
       return;
     }
     res.statusCode = 404;
@@ -133,6 +168,9 @@ test("live ion mode submits and maps queued/processing/completed statuses", asyn
     const submitted = (await submit.json()) as { jobId: string; integrationMode: string };
     assert.equal(submitted.integrationMode, "live");
     assert.equal(createCalls, 1);
+    assert.equal(uploadCompleteCalls, 1);
+    assert.equal(uploadedKeys.length, 36);
+    assert.ok(uploadedKeys.every((key) => key.startsWith("session-123/")));
 
     let terminalPayload:
       | {
@@ -177,7 +215,7 @@ test("live ion mode submits and maps queued/processing/completed statuses", asyn
   }
 });
 
-test("live ion 405 submission returns actionable endpoint/scope guidance", async () => {
+test("live ion 403 asset creation returns actionable scope guidance", async () => {
   const ionServer = createServer((req, res) => {
     if (req.method === "GET" && req.url?.startsWith("/v1/assets")) {
       res.setHeader("content-type", "application/json");
@@ -188,12 +226,6 @@ test("live ion 405 submission returns actionable endpoint/scope guidance", async
       res.statusCode = 403;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ code: "Forbidden", message: "Token lacks write scope." }));
-      return;
-    }
-    if (req.method === "POST" && req.url === "/v1/reality-capture/gaussian-splats/jobs") {
-      res.statusCode = 405;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ code: "MethodNotAllowed", message: "POST is not allowed" }));
       return;
     }
     res.statusCode = 404;
@@ -225,11 +257,10 @@ test("live ion 405 submission returns actionable endpoint/scope guidance", async
     });
     assert.equal(submit.status, 502);
     const body = (await submit.json()) as { error: string };
-    assert.match(body.error, /405 MethodNotAllowed/);
-    assert.match(body.error, /POST is not allowed/);
-    assert.match(body.error, /different\/partner endpoint/i);
+    assert.match(body.error, /asset creation was denied/i);
+    assert.match(body.error, /403 Forbidden/);
+    assert.match(body.error, /Token lacks write scope/);
     assert.match(body.error, /assets:write/i);
-    assert.match(body.error, /mock mode/i);
   } finally {
     await stopServer(server);
     await stopServer(ionServer);
