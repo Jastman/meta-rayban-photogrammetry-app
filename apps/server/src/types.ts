@@ -83,6 +83,7 @@ export interface AssetJob {
     jobId: string;
     statusPath?: string;
     assetId?: string | number;
+    uploadComplete?: boolean;
     lastPolledAt?: string;
     submittedAt: string;
     errorMessage?: string;
