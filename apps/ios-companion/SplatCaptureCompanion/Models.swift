@@ -160,6 +160,26 @@ struct JobSubmissionResponse: Codable, Sendable {
     let jobId: String
 }
 
+struct IonReadinessResponse: Codable, Sendable {
+    let tokenPresent: Bool
+    let readAccessOk: Bool?
+    let writeScopeOk: Bool?
+    let message: String
+    let checkedAt: String?
+}
+
+struct BackendCesiumConfig: Codable, Sendable {
+    let apiUrl: String
+    let hasToken: Bool
+    let allowMockResults: Bool
+    let enableLiveIonSubmission: Bool
+    let ionReadiness: IonReadinessResponse?
+}
+
+struct BackendConfigResponse: Codable, Sendable {
+    let cesium: BackendCesiumConfig
+}
+
 enum ReconstructionResultProvider: String, Codable, Sendable {
     case mock
     case ion

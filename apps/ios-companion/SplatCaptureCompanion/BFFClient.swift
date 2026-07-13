@@ -6,6 +6,7 @@ protocol CaptureBackendClient: Sendable {
     func uploadPhoto(sessionID: String, photo: PhotoUpload, jpeg: Data) async throws -> PhotoUploadResponse
     func submitReconstruction(sessionID: String) async throws -> JobSubmissionResponse
     func jobStatus(jobID: String) async throws -> JobStatusResponse
+    func fetchConfig() async throws -> BackendConfigResponse
 }
 
 actor BFFClient {
@@ -49,6 +50,10 @@ actor BFFClient {
 
     func jobStatus(jobID: String) async throws -> JobStatusResponse {
         try await request(path: "api/assets/jobs/\(jobID)", method: "GET", body: Optional<String>.none)
+    }
+
+    func fetchConfig() async throws -> BackendConfigResponse {
+        try await request(path: "api/config", method: "GET", body: Optional<String>.none)
     }
 
     private func request<Response: Decodable, Body: Encodable>(
