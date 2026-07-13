@@ -93,15 +93,24 @@ test("live ion mode submits and maps queued/processing/completed statuses", asyn
           return;
         }
         createCalls += 1;
+        const name = parsed.name as string;
         assert.equal(parsed.type, "3DTILES");
-        assert.equal((parsed.options as { sourceType: string }).sourceType, "3D_CAPTURE");
-        assert.equal((parsed.options as { gaussianSplats: boolean }).gaussianSplats, true);
+        assert.equal(parsed.attribution, "");
+        assert.deepEqual(parsed.options, {
+          sourceType: "RASTER_IMAGERY",
+          outputs: [
+            { outputType: "3DTILES", name: `${name} mesh` },
+            { outputType: "SPLATS_3DTILES", name: `${name} splats` },
+            { outputType: "LAS", name: `${name} point cloud` },
+          ],
+        });
         const address = ionServer.address();
         assert.ok(address && typeof address !== "string");
         res.setHeader("content-type", "application/json");
         res.end(
           JSON.stringify({
             assetMetadata: { id: 987654 },
+            assets: [{ id: 987654, outputType: "SPLATS_3DTILES" }],
             uploadLocation: {
               bucket: "capture-bucket",
               prefix: "session-123/",
@@ -169,8 +178,9 @@ test("live ion mode submits and maps queued/processing/completed statuses", asyn
     assert.equal(submitted.integrationMode, "live");
     assert.equal(createCalls, 1);
     assert.equal(uploadCompleteCalls, 1);
-    assert.equal(uploadedKeys.length, 36);
+    assert.equal(uploadedKeys.length, 1);
     assert.ok(uploadedKeys.every((key) => key.startsWith("session-123/")));
+    assert.match(decodeURIComponent(uploadedKeys[0] ?? ""), /\.zip(?:$|\?)/);
 
     let terminalPayload:
       | {

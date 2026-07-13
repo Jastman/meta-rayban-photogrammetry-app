@@ -186,68 +186,120 @@ struct ContentView: View {
     private var reconstructionCard: some View {
         GroupBox("Reconstruction") {
             VStack(alignment: .leading, spacing: 10) {
-                statusRow("State", model.reconstructionStatus?.rawValue ?? "not submitted")
-                Text(model.reconstructionMessage).foregroundStyle(.secondary)
-                if
-                    model.reconstructionStatus == .completedMock,
-                    let result = model.reconstructionResult
-                {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Mock reconstruction output", systemImage: "sparkles.rectangle.stack")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.orange)
-                        if let thumbnailURL = result.thumbnailURL {
-                            AsyncImage(url: thumbnailURL) { phase in
-                                if let image = phase.image {
-                                    image
-                                        .resizable()
-                                        .scaledToFit()
-                                } else if phase.error != nil {
-                                    Text("Preview unavailable")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                } else {
-                                    ProgressView()
-                                }
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 120)
-                            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-                        }
-                        Text("Provider: \(result.provider.rawValue)")
-                            .font(.caption)
-                        if let format = result.format {
-                            Text("Format: \(format)")
-                                .font(.caption)
-                        }
-                        if let notes = result.notes, !notes.isEmpty {
-                            Text(notes)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        if let resultURL = result.resultURL {
-                            Link("Open result", destination: resultURL)
-                                .font(.subheadline.weight(.semibold))
-                        }
+                if let active = model.activeReconstruction {
+                    reconstructionJobCard(
+                        title: "Active job",
+                        job: active,
+                        emphasize: true
+                    )
+                } else {
+                    statusRow("State", model.reconstructionStatus?.rawValue ?? "not submitted")
+                    if let progress = model.reconstructionProgress {
+                        statusRow("Progress", progressDisplay(progress))
                     }
-                    .padding(10)
-                    .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
+                    Text(model.reconstructionMessage).foregroundStyle(.secondary)
+                }
+                if !model.previousReconstructions.isEmpty {
+                    Divider()
+                    Text("Previous reconstructions")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(model.previousReconstructions.prefix(5)) { item in
+                        reconstructionJobCard(
+                            title: timestampTitle(for: item),
+                            job: item,
+                            emphasize: false
+                        )
+                    }
                 }
                 Button(model.notificationsEnabled ? "Completion alerts enabled" : "Enable completion alerts") {
                     Task { await model.enableNotifications() }
                 }
                 .buttonStyle(.bordered)
                 .disabled(model.notificationsEnabled)
-                Button("Submit reconstruction") {
+                Button(model.isSubmittingReconstruction ? "Submitting..." : "Submit reconstruction") {
                     Task { await model.submitReconstruction() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.completedStationCount < 36)
+                .disabled(!model.canSubmitReconstruction)
                 Text("Local alerts require this companion session to remain active. Production background completion needs APNs and server push.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func reconstructionJobCard(
+        title: String,
+        job: AppModel.ReconstructionJobViewData,
+        emphasize: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(String(job.jobID.prefix(8)))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            statusRow("State", job.status.rawValue)
+            if let progress = job.progress {
+                statusRow("Progress", progressDisplay(progress))
+                ProgressView(value: min(max(progress, 0), 100), total: 100)
+            }
+            Text(job.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let result = job.result {
+                Text("Provider: \(result.provider.rawValue)")
+                    .font(.caption)
+                if let format = result.format {
+                    Text("Format: \(format)")
+                        .font(.caption)
+                }
+                if let notes = result.notes, !notes.isEmpty {
+                    Text(notes)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let thumbnailURL = result.thumbnailURL {
+                    AsyncImage(url: thumbnailURL) { phase in
+                        if let image = phase.image {
+                            image
+                                .resizable()
+                                .scaledToFit()
+                        } else if phase.error != nil {
+                            Text("Preview unavailable")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 80)
+                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                }
+                if let resultURL = result.resultURL {
+                    Link("Open result", destination: resultURL)
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            emphasize ? AnyShapeStyle(Color.blue.opacity(0.08)) : AnyShapeStyle(.quaternary.opacity(0.2)),
+            in: RoundedRectangle(cornerRadius: 10)
+        )
+    }
+
+    private func progressDisplay(_ progress: Double) -> String {
+        "\(Int(progress.rounded()))%"
+    }
+
+    private func timestampTitle(for job: AppModel.ReconstructionJobViewData) -> String {
+        "Submitted \(job.submittedAt.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private func statusRow(_ label: String, _ value: String) -> some View {
