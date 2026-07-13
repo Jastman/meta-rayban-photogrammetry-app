@@ -123,7 +123,10 @@ final class AppModel: ObservableObject {
     }
 
     var hasActiveReconstructionInFlight: Bool {
-        activeReconstruction?.status.isTerminal == false
+        guard let captureSessionID else { return false }
+        return reconstructionJobs.contains {
+            $0.sessionID == captureSessionID && !$0.status.isTerminal
+        }
     }
 
     var canSubmitReconstruction: Bool {
@@ -138,6 +141,27 @@ final class AppModel: ObservableObject {
         case idle
         case starting
         case started
+    }
+
+    private static let reconstructionJobsStorageKey = "splat-capture.reconstruction-jobs.v1"
+
+    private struct StoredReconstructionResult: Codable {
+        let provider: ReconstructionResultProvider
+        let format: String?
+        let notes: String?
+        let thumbnailURL: String?
+        let resultURL: String?
+    }
+
+    private struct StoredReconstructionJob: Codable {
+        let jobID: String
+        let sessionID: String
+        let submittedAt: Date
+        let updatedAt: Date
+        let status: ReconstructionStatus
+        let progress: Double?
+        let message: String
+        let result: StoredReconstructionResult?
     }
 
     init() {
@@ -159,6 +183,8 @@ final class AppModel: ObservableObject {
             backendBaseURL = nil
             configurationMessage = error.localizedDescription
         }
+        restorePersistedReconstructionJobs()
+        refreshReconstructionSummary()
     }
 
     init(
@@ -175,6 +201,8 @@ final class AppModel: ObservableObject {
         self.configurationMessage = configurationMessage
         self.fallbackCamera = fallbackCamera
         self.backendBaseURL = backendBaseURL
+        restorePersistedReconstructionJobs()
+        refreshReconstructionSummary()
     }
 
     func start() async {
@@ -199,6 +227,9 @@ final class AppModel: ObservableObject {
                 }
             }
             startupState = .started
+            if let client {
+                startMonitoringTrackedJobs(client: client)
+            }
         } catch {
             startupState = .idle
             errorMessage = error.localizedDescription
@@ -372,8 +403,8 @@ final class AppModel: ObservableObject {
             errorMessage = "A reconstruction submit is already in progress."
             return
         }
-        if let active = activeReconstruction, !active.status.isTerminal {
-            errorMessage = "Reconstruction \(active.jobID) is still in progress. Wait for it to finish before submitting again."
+        if let active = reconstructionJobs.first(where: { $0.sessionID == captureSessionID && !$0.status.isTerminal }) {
+            errorMessage = "Reconstruction \(active.jobID) is still in progress for this capture session. Wait for it to finish before submitting again."
             return
         }
         await perform {
@@ -392,7 +423,7 @@ final class AppModel: ObservableObject {
             )
             self.activeReconstructionJobID = response.jobId
             self.refreshReconstructionSummary()
-            self.monitor(jobID: response.jobId, client: client)
+            self.startMonitoringTrackedJobs(client: client)
         }
     }
 
@@ -433,57 +464,64 @@ final class AppModel: ObservableObject {
         cameraPermission = try await camera.cameraPermission()
     }
 
-    private func monitor(jobID: String, client: CaptureBackendClient) {
-        monitoringTask?.cancel()
+    private func startMonitoringTrackedJobs(client: CaptureBackendClient) {
+        guard monitoringTask == nil else { return }
         monitoringTask = Task {
+            defer { monitoringTask = nil }
             while !Task.isCancelled {
-                do {
-                    let response = try await client.jobStatus(jobID: jobID)
-                    let resolvedResult = resolveResultViewData(from: response.result)
-                    upsertReconstructionJob(
-                        jobID: response.jobId,
-                        sessionID: response.sessionId,
-                        submittedAt: existingSubmissionDate(for: response.jobId) ?? Date(),
-                        status: response.status,
-                        progress: response.progress,
-                        message: response.message,
-                        result: resolvedResult
-                    )
-                    if activeReconstructionJobID == nil || activeReconstructionJobID == response.jobId {
-                        activeReconstructionJobID = response.jobId
+                let pendingJobIDs = reconstructionJobs
+                    .filter { !$0.status.isTerminal }
+                    .map(\.jobID)
+                if pendingJobIDs.isEmpty {
+                    if let latest = reconstructionJobs.first?.jobID {
+                        activeReconstructionJobID = latest
+                        refreshReconstructionSummary()
                     }
-                    refreshReconstructionSummary()
-                    if response.status.isTerminal {
-                        if response.status.isSuccess && notificationsEnabled {
+                    return
+                }
+                if activeReconstructionJobID == nil || !pendingJobIDs.contains(activeReconstructionJobID ?? "") {
+                    activeReconstructionJobID = pendingJobIDs.first
+                }
+
+                for jobID in pendingJobIDs {
+                    do {
+                        let response = try await client.jobStatus(jobID: jobID)
+                        let priorStatus = reconstructionJobs.first(where: { $0.jobID == response.jobId })?.status
+                        let resolvedResult = resolveResultViewData(from: response.result)
+                        upsertReconstructionJob(
+                            jobID: response.jobId,
+                            sessionID: response.sessionId,
+                            submittedAt: existingSubmissionDate(for: response.jobId) ?? Date(),
+                            status: response.status,
+                            progress: response.progress,
+                            message: response.message,
+                            result: resolvedResult
+                        )
+                        if response.status.isSuccess && !((priorStatus?.isSuccess) ?? false) && notificationsEnabled {
                             try? await notifications.notifySuccess(
-                                jobID: jobID,
+                                jobID: response.jobId,
                                 mock: response.status == .completedMock
                             )
                         }
-                        if activeReconstructionJobID == response.jobId {
-                            activeReconstructionJobID = nil
-                            refreshReconstructionSummary()
+                    } catch {
+                        if let tracked = reconstructionJobs.first(where: { $0.jobID == jobID }) {
+                            upsertReconstructionJob(
+                                jobID: tracked.jobID,
+                                sessionID: tracked.sessionID,
+                                submittedAt: tracked.submittedAt,
+                                status: tracked.status,
+                                progress: tracked.progress,
+                                message: "Status polling failed: \(error.localizedDescription)",
+                                result: tracked.result
+                            )
                         }
-                        return
+                        errorMessage = error.localizedDescription
                     }
-                    try await Task.sleep(for: .seconds(2))
-                } catch {
-                    if let active = activeReconstruction {
-                        upsertReconstructionJob(
-                            jobID: active.jobID,
-                            sessionID: active.sessionID,
-                            submittedAt: active.submittedAt,
-                            status: .failedLiveNotImplemented,
-                            progress: active.progress,
-                            message: "Status polling failed: \(error.localizedDescription)",
-                            result: active.result
-                        )
-                        activeReconstructionJobID = nil
-                        refreshReconstructionSummary()
-                    }
-                    errorMessage = error.localizedDescription
-                    return
                 }
+
+                refreshReconstructionSummary()
+                persistReconstructionJobs()
+                try? await Task.sleep(for: .seconds(2))
             }
         }
     }
@@ -573,6 +611,7 @@ final class AppModel: ObservableObject {
             reconstructionJobs.insert(updated, at: 0)
         }
         reconstructionJobs.sort { $0.updatedAt > $1.updatedAt }
+        persistReconstructionJobs()
     }
 
     private func refreshReconstructionSummary() {
@@ -596,6 +635,68 @@ final class AppModel: ObservableObject {
         reconstructionProgress = nil
         reconstructionMessage = "Not submitted"
         reconstructionResult = nil
+    }
+
+    private func restorePersistedReconstructionJobs() {
+        guard
+            let data = UserDefaults.standard.data(forKey: Self.reconstructionJobsStorageKey),
+            let stored = try? JSONDecoder().decode([StoredReconstructionJob].self, from: data)
+        else {
+            return
+        }
+
+        reconstructionJobs = stored.map { item in
+            ReconstructionJobViewData(
+                id: item.jobID,
+                jobID: item.jobID,
+                sessionID: item.sessionID,
+                submittedAt: item.submittedAt,
+                updatedAt: item.updatedAt,
+                status: item.status,
+                progress: item.progress,
+                message: item.message,
+                result: item.result.map { storedResult in
+                    ReconstructionResultViewData(
+                        provider: storedResult.provider,
+                        format: storedResult.format,
+                        notes: storedResult.notes,
+                        thumbnailURL: resolveURL(storedResult.thumbnailURL),
+                        resultURL: resolveURL(storedResult.resultURL)
+                    )
+                }
+            )
+        }
+        reconstructionJobs.sort { $0.updatedAt > $1.updatedAt }
+        activeReconstructionJobID = reconstructionJobs.first(where: { !$0.status.isTerminal })?.jobID
+            ?? reconstructionJobs.first?.jobID
+    }
+
+    private func persistReconstructionJobs() {
+        let stored = reconstructionJobs.map { item in
+            StoredReconstructionJob(
+                jobID: item.jobID,
+                sessionID: item.sessionID,
+                submittedAt: item.submittedAt,
+                updatedAt: item.updatedAt,
+                status: item.status,
+                progress: item.progress,
+                message: item.message,
+                result: item.result.map { result in
+                    StoredReconstructionResult(
+                        provider: result.provider,
+                        format: result.format,
+                        notes: result.notes,
+                        thumbnailURL: result.thumbnailURL?.absoluteString,
+                        resultURL: result.resultURL?.absoluteString
+                    )
+                }
+            )
+        }
+
+        guard let encoded = try? JSONEncoder().encode(stored) else {
+            return
+        }
+        UserDefaults.standard.set(encoded, forKey: Self.reconstructionJobsStorageKey)
     }
 
     private func resolveURL(_ rawValue: String?) -> URL? {
