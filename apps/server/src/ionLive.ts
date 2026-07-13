@@ -1,6 +1,7 @@
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { ZipFile } from "yazl";
 import { getCapturePhotoData } from "./store.js";
 import type { ServerConfig } from "./config.js";
 import type { AssetJob, CaptureSession, JobStatus } from "./types.js";
@@ -24,6 +25,10 @@ interface IonCreateAssetResponse {
   assetMetadata?: {
     id?: string | number;
   };
+  assets?: Array<{
+    id?: string | number;
+    outputType?: string;
+  }>;
   id?: string | number;
   assetId?: string | number;
   uploadLocation?: IonUploadLocation;
@@ -45,6 +50,13 @@ interface IonAssetStatusResponse {
 interface IonErrorPayload {
   code?: string;
   message?: string;
+}
+
+interface ParsedIonBody {
+  code?: string;
+  message: string;
+  rawBody: string;
+  parsedBody?: unknown;
 }
 
 const toAbsoluteUrl = (baseUrl: string, rawPath: string): string =>
@@ -76,29 +88,67 @@ const ionHeaders = (config: ServerConfig): HeadersInit => ({
   "content-type": "application/json",
 });
 
-const readIonError = async (response: Response): Promise<{ code?: string; message: string }> => {
+const debugLog = (config: ServerConfig, context: string, details?: unknown): void => {
+  if (!config.ionDebugLogs) {
+    return;
+  }
+  if (details === undefined) {
+    console.log(`[ion-live] ${context}`);
+    return;
+  }
+  console.log(`[ion-live] ${context}`, details);
+};
+
+const debugError = (config: ServerConfig, context: string, details?: unknown): void => {
+  if (!config.ionDebugLogs) {
+    return;
+  }
+  if (details === undefined) {
+    console.error(`[ion-live] ${context}`);
+    return;
+  }
+  console.error(`[ion-live] ${context}`, details);
+};
+
+const readIonBody = async (response: Response): Promise<ParsedIonBody> => {
   const text = await response.text();
   if (!text) {
-    return { message: "empty response body" };
+    return { message: "empty response body", rawBody: "" };
   }
   try {
-    const parsed = JSON.parse(text) as IonErrorPayload;
+    const parsed = JSON.parse(text) as IonErrorPayload & Record<string, unknown>;
+    const message =
+      typeof parsed.message === "string"
+        ? parsed.message
+        : typeof parsed.error === "string"
+          ? parsed.error
+          : text;
     return {
       code: parsed.code,
-      message: parsed.message ?? text,
+      message,
+      rawBody: text,
+      parsedBody: parsed,
     };
   } catch {
-    return { message: text };
+    return { message: text, rawBody: text };
   }
+};
+
+const formatIonErrorDetails = (body: ParsedIonBody): string => {
+  if (body.parsedBody != null) {
+    return JSON.stringify(body.parsedBody);
+  }
+  return body.rawBody || body.message;
 };
 
 const assertOk = async (response: Response, context: string): Promise<void> => {
   if (response.ok) {
     return;
   }
-  const error = await readIonError(response);
+  const error = await readIonBody(response);
+  const details = formatIonErrorDetails(error);
   throw new Error(
-    `${context} failed (${response.status}${error.code ? ` ${error.code}` : ""}): ${error.message}`,
+    `${context} failed (${response.status}${error.code ? ` ${error.code}` : ""}): ${error.message}${details ? ` | body: ${details}` : ""}`,
   );
 };
 
@@ -110,14 +160,15 @@ const verifyIonReadAccess = async (config: ServerConfig): Promise<void> => {
   if (readResponse.ok) {
     return;
   }
-  const error = await readIonError(readResponse);
+  const error = await readIonBody(readResponse);
+  const details = formatIonErrorDetails(error);
   if (readResponse.status === 401 || readResponse.status === 403) {
     throw new Error(
-      `Cesium ion token failed read-access preflight (${readResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}). Verify the token is valid for this account and has asset read access.`,
+      `Cesium ion token failed read-access preflight (${readResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}). Verify the token is valid for this account and has asset read access.${details ? ` Response body: ${details}` : ""}`,
     );
   }
   throw new Error(
-    `Cesium ion read-access preflight failed (${readResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}).`,
+    `Cesium ion read-access preflight failed (${readResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}).${details ? ` Response body: ${details}` : ""}`,
   );
 };
 
@@ -128,8 +179,9 @@ const probeIonWriteScope = async (config: ServerConfig): Promise<string | undefi
     body: JSON.stringify({}),
   });
   if (probeResponse.status === 401 || probeResponse.status === 403) {
-    const error = await readIonError(probeResponse);
-    return `Write-scope probe was denied (${probeResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}). Create/use a Cesium ion token with assets:write permission.`;
+    const error = await readIonBody(probeResponse);
+    const details = formatIonErrorDetails(error);
+    return `Write-scope probe was denied (${probeResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}). Create/use a Cesium ion token with assets:write permission.${details ? ` Response body: ${details}` : ""}`;
   }
   return undefined;
 };
@@ -158,9 +210,65 @@ const resolveS3ObjectKey = (prefix: string | undefined, fileName: string): strin
   return prefix.endsWith("/") ? `${prefix}${fileName}` : `${prefix}/${fileName}`;
 };
 
-const uploadPhotosToIonS3 = async (
-  uploadLocation: IonUploadLocation,
+const deriveRegionFromS3Endpoint = (endpoint: string | undefined): string | undefined => {
+  if (!endpoint) {
+    return undefined;
+  }
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    const match = host.match(/s3[.-]([a-z0-9-]+)\./);
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
+};
+
+const sanitizePathPart = (value: string): string =>
+  value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "") || "capture";
+
+const isJpegFileName = (fileName: string): boolean => /\.(jpe?g)$/i.test(fileName);
+
+const buildJpegArchive = async (
+  sessionId: string,
   photos: Array<{ fileName: string; bytes: Buffer }>,
+): Promise<{ archiveName: string; bytes: Buffer; photoCount: number }> => {
+  const archiveBaseName = `splat-capture-${sanitizePathPart(sessionId)}`;
+  const zip = new ZipFile();
+  let photoCount = 0;
+  for (const photo of photos) {
+    if (!isJpegFileName(photo.fileName)) {
+      continue;
+    }
+    photoCount += 1;
+    const safeName = sanitizePathPart(photo.fileName);
+    zip.addBuffer(photo.bytes, `${archiveBaseName}/${safeName}`);
+  }
+  if (photoCount === 0) {
+    throw new Error("No JPEG photos were available to package for Cesium ion upload.");
+  }
+
+  const bytes = await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    zip.outputStream.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    zip.outputStream.on("error", reject);
+    zip.outputStream.on("end", () => resolve(Buffer.concat(chunks)));
+    zip.end();
+  });
+
+  return {
+    archiveName: `${archiveBaseName}.zip`,
+    bytes,
+    photoCount,
+  };
+};
+
+const uploadArchiveToIonS3 = async (
+  uploadLocation: IonUploadLocation,
+  archive: { archiveName: string; bytes: Buffer },
 ): Promise<void> => {
   if (
     !uploadLocation.bucket ||
@@ -172,8 +280,9 @@ const uploadPhotosToIonS3 = async (
     throw new Error("Cesium ion create-asset response is missing upload credentials.");
   }
 
+  const uploadRegion = deriveRegionFromS3Endpoint(uploadLocation.endpoint);
   const s3Client = new S3Client({
-    region: "us-east-1",
+    region: uploadRegion ?? "auto",
     endpoint: uploadLocation.endpoint,
     forcePathStyle: true,
     credentials: {
@@ -183,17 +292,13 @@ const uploadPhotosToIonS3 = async (
     },
   });
 
-  await Promise.all(
-    photos.map((photo) =>
-      s3Client.send(
-        new PutObjectCommand({
-          Bucket: uploadLocation.bucket,
-          Key: resolveS3ObjectKey(uploadLocation.prefix, photo.fileName),
-          Body: photo.bytes,
-          ContentType: "image/jpeg",
-        }),
-      ),
-    ),
+  await s3Client.send(
+    new PutObjectCommand({
+      Bucket: uploadLocation.bucket,
+      Key: resolveS3ObjectKey(uploadLocation.prefix, archive.archiveName),
+      Body: archive.bytes,
+      ContentType: "application/zip",
+    }),
   );
 };
 
@@ -205,12 +310,28 @@ const signalIonUploadComplete = async (
     throw new Error("Cesium ion create-asset response is missing onComplete.url.");
   }
 
-  const response = await fetch(toAbsoluteUrl(config.cesiumIonApiUrl, onComplete.url), {
+  const uploadCompleteUrl = toAbsoluteUrl(config.cesiumIonApiUrl, onComplete.url);
+  const response = await fetch(uploadCompleteUrl, {
     method: (onComplete.method ?? "POST").toUpperCase(),
     headers: ionHeaders(config),
     body: JSON.stringify(onComplete.fields ?? {}),
   });
-  await assertOk(response, "Cesium ion upload completion");
+  if (!response.ok) {
+    const error = await readIonBody(response);
+    debugError(config, "uploadComplete failed", {
+      url: uploadCompleteUrl,
+      status: response.status,
+      body: error.parsedBody ?? error.rawBody,
+    });
+    const details = formatIonErrorDetails(error);
+    throw new Error(
+      `Cesium ion upload completion failed (${response.status}${error.code ? ` ${error.code}` : ""}): ${error.message}${details ? ` | body: ${details}` : ""}`,
+    );
+  }
+  debugLog(config, "uploadComplete succeeded", {
+    url: uploadCompleteUrl,
+    status: response.status,
+  });
 };
 
 export const initializeIonLiveJob = async (
@@ -231,44 +352,99 @@ export const initializeIonLiveJob = async (
   const writeScopeGuidance = await probeIonWriteScope(config);
 
   const photos = await resolvePhotoBytes(session, config);
+  const captureName = `Splat Capture ${session.id}`;
+  const createAssetPayload = {
+    name: captureName,
+    description: "Gaussian Splat captured via Meta Ray-Ban companion app",
+    attribution: "",
+    type: "3DTILES",
+    options: {
+      sourceType: "RASTER_IMAGERY",
+      outputs: [
+        {
+          outputType: "3DTILES",
+          name: `${captureName} mesh`,
+        },
+        {
+          outputType: "SPLATS_3DTILES",
+          name: `${captureName} splats`,
+        },
+        {
+          outputType: "LAS",
+          name: `${captureName} point cloud`,
+        },
+      ],
+    },
+  } as const;
+  debugLog(config, "create asset request", {
+    url: toAbsoluteUrl(config.cesiumIonApiUrl, "/v1/assets"),
+    payload: createAssetPayload,
+  });
   const createResponse = await fetch(toAbsoluteUrl(config.cesiumIonApiUrl, "/v1/assets"), {
     method: "POST",
     headers: ionHeaders(config),
-    body: JSON.stringify({
-      name: `Splat Capture ${session.id}`,
-      description: "Gaussian Splat captured via Meta Ray-Ban companion app",
-      type: "3DTILES",
-      options: {
-        sourceType: "3D_CAPTURE",
-        gaussianSplats: true,
-      },
-    }),
+    body: JSON.stringify(createAssetPayload),
+  });
+  const createResponseHeaders = {
+    contentType: createResponse.headers.get("content-type"),
+    xRequestId: createResponse.headers.get("x-request-id"),
+    xCesiumTraceId: createResponse.headers.get("x-cesium-trace-id"),
+  };
+  debugLog(config, "create asset response", {
+    status: createResponse.status,
+    headers: createResponseHeaders,
   });
   if (!createResponse.ok) {
-    const error = await readIonError(createResponse);
+    const error = await readIonBody(createResponse);
+    debugError(config, "create asset failed", {
+      status: createResponse.status,
+      headers: createResponseHeaders,
+      body: error.parsedBody ?? error.rawBody,
+    });
+    const details = formatIonErrorDetails(error);
     if (createResponse.status === 401 || createResponse.status === 403) {
       throw new Error(
-        `Cesium ion asset creation was denied (${createResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}). ${writeScopeGuidance ?? "Create/use a Cesium ion token with assets:write permission."}`,
+        `Cesium ion asset creation was denied (${createResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}${details ? ` | body: ${details}` : ""}). ${writeScopeGuidance ?? "Create/use a Cesium ion token with assets:write permission."}`,
       );
     }
     throw new Error(
-      `Cesium ion asset creation failed (${createResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message})`,
+      `Cesium ion asset creation failed (${createResponse.status}${error.code ? ` ${error.code}` : ""}: ${error.message}${details ? ` | body: ${details}` : ""})`,
     );
   }
 
   const createPayload = (await createResponse.json()) as IonCreateAssetResponse;
-  const assetId = createPayload.assetMetadata?.id ?? createPayload.assetId ?? createPayload.id;
+  debugLog(config, "create asset payload summary", {
+    assetMetadata: createPayload.assetMetadata,
+    assets: createPayload.assets,
+    hasUploadLocation: Boolean(createPayload.uploadLocation),
+    hasOnComplete: Boolean(createPayload.onComplete),
+  });
+  const splatAssetId = createPayload.assets?.find((asset) => asset.outputType === "SPLATS_3DTILES")?.id;
+  const assetId =
+    splatAssetId ?? createPayload.assetMetadata?.id ?? createPayload.assetId ?? createPayload.id;
   if (assetId == null) {
     throw new Error("Cesium ion create-asset response did not include an asset identifier.");
   }
 
-  await uploadPhotosToIonS3(createPayload.uploadLocation ?? {}, photos);
+  const archive = await buildJpegArchive(session.id, photos);
+  debugLog(config, "s3 upload starting", {
+    archiveName: archive.archiveName,
+    archiveBytes: archive.bytes.byteLength,
+    photoCount: archive.photoCount,
+    bucket: createPayload.uploadLocation?.bucket,
+    prefix: createPayload.uploadLocation?.prefix,
+    endpoint: createPayload.uploadLocation?.endpoint,
+  });
+  await uploadArchiveToIonS3(createPayload.uploadLocation ?? {}, archive);
+  debugLog(config, "s3 upload completed", {
+    archiveName: archive.archiveName,
+  });
   await signalIonUploadComplete(createPayload.onComplete, config);
 
   return {
     status: "queued",
     progress: 5,
-    message: `Uploaded ${photos.length} photos to Cesium ion. Asset processing is queued.`,
+    message: `Uploaded ${archive.photoCount} photos to Cesium ion. Asset processing is queued.`,
     ion: {
       jobId: String(job.id ?? assetId),
       assetId,
@@ -295,7 +471,18 @@ export const refreshIonLiveJob = async (
     method: "GET",
     headers: ionHeaders(config),
   });
-  await assertOk(statusResponse, "Cesium ion live reconstruction status poll");
+  if (!statusResponse.ok) {
+    const error = await readIonBody(statusResponse);
+    debugError(config, "status poll failed", {
+      statusPath: job.ion.statusPath,
+      status: statusResponse.status,
+      body: error.parsedBody ?? error.rawBody,
+    });
+    const details = formatIonErrorDetails(error);
+    throw new Error(
+      `Cesium ion live reconstruction status poll failed (${statusResponse.status}${error.code ? ` ${error.code}` : ""}): ${error.message}${details ? ` | body: ${details}` : ""}`,
+    );
+  }
   const statusPayload = (await statusResponse.json()) as IonAssetStatusResponse;
 
   const mappedStatus = mapIonStatus(statusPayload.status ?? "IN_PROGRESS");

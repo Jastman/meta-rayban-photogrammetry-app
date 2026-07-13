@@ -182,7 +182,7 @@ struct JobStatusResponse: Codable, Sendable {
     let jobId: String
     let sessionId: String
     let status: ReconstructionStatus
-    let progress: Double
+    let progress: Double?
     let message: String
     let result: ReconstructionResultPayload?
 
@@ -190,7 +190,7 @@ struct JobStatusResponse: Codable, Sendable {
         jobId: String,
         sessionId: String,
         status: ReconstructionStatus,
-        progress: Double,
+        progress: Double? = nil,
         message: String,
         result: ReconstructionResultPayload? = nil
     ) {

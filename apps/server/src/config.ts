@@ -2,6 +2,7 @@ export interface ServerConfig {
   port: number;
   cesiumIonToken: string | null;
   cesiumIonApiUrl: string;
+  ionDebugLogs: boolean;
   allowMockResults: boolean;
   enableLiveIonSubmission: boolean;
   publicBaseUrl: string;
@@ -26,6 +27,7 @@ export const loadConfig = (): ServerConfig => ({
   port: Number(process.env.PORT ?? 8787),
   cesiumIonToken: process.env.CESIUM_ION_TOKEN ?? null,
   cesiumIonApiUrl: process.env.CESIUM_ION_API_URL ?? "https://api.cesium.com",
+  ionDebugLogs: parseBoolean(process.env.ION_DEBUG_LOGS, false),
   allowMockResults: parseBoolean(process.env.ALLOW_MOCK_RESULTS, true),
   enableLiveIonSubmission: parseBoolean(process.env.ENABLE_LIVE_ION_SUBMISSION, false),
   publicBaseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:8787",
